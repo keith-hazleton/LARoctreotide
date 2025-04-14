@@ -1,0 +1,280 @@
+---
+title: "Long Acting Octreotide for Prevention of Variceal Bleeding"
+author: "Sammie Rosen and Keith Hazleton"
+date: "`r Sys.Date()`"
+format: html
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+Variceal hemorrhage poses a significant threat to children with chronic liver disease, often leading to severe morbidity and mortality. Octreotide, a somatostatin-analogue, reduces portal venous flow, decreasing blood flow to varices associated with portal hypertension. This retrospective cohort study at Children’s Hospital Los Angeles (CHLA) identified 44 patients who received at least one dose of subcutaneous long-acting octreotide between January 2013 and December 2023. Data on variceal grades, EGD interventions, bleeding episodes, and adverse events were collected.
+
+# Data Loading and Setup
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(ggsignif)
+library(lubridate)
+library(lmerTest)  # For linear mixed models
+library(ggpubr)  
+library(lme4)
+library(gridExtra)
+library(gtsummary)
+
+# Set working directory
+
+setwd("~/Library/CloudStorage/OneDrive-ChildrensHospitalLosAngeles/Octreotide Study/")
+
+# Load Datasets
+
+datatable <- read.csv("data/csv files/cleaned_datatable.csv")
+labsdata <- read.csv("data/csv files/labsdata.csv")
+endoscopydata <- read.csv("data/csv files/Endoscopy Reports(updated).csv")
+dosedata <- read.csv("data/csv files/oct_doses_withrand.csv")
+
+
+#### setting up the data #### 
+# Convert the date columns to Date type
+datatable$date.of.first.dose <- as.Date(datatable$date.of.first.dose, format="%Y-%m-%d")
+endoscopydata$Date.of.endoscopy <- as.Date(endoscopydata$Date, format="%m/%d/%Y")
+
+# Get unique rand values from data
+unique_rands <- unique(datatable$rand)
+
+# Merge the datasets
+merged_data <- endoscopydata %>%
+  left_join(datatable, by = c("Rand_id" = "rand"))
+
+# Ensure Grade.of.varices is numeric, coercing any non-numeric values to NA
+merged_data$Grade.of.varices <- as.numeric(merged_data$Grade.of.varices)
+
+# Filter the dates
+before_filtered_data <- merged_data %>%
+  filter(Date.of.endoscopy < date.of.first.dose)
+ 
+after_filtered_data <- merged_data %>%
+  filter(Date.of.endoscopy >= date.of.first.dose)
+
+no_scopes <- datatable%>%
+  filter(Number.of.Endoscopies == 0)
+
+####Process the Data for Before and After Values ####
+
+# 1. Find the "Before" value closest to the treatment date for each patient
+before_data <- merged_data %>%
+  filter(Date.of.endoscopy < date.of.first.dose) %>%
+  group_by(Rand_id) %>%
+  filter(Date.of.endoscopy == max(Date.of.endoscopy)) %>%  # Get the closest date before treatment
+  select(Rand_id, Grade.of.varices, Date.of.endoscopy, age.at.first.dose, Disease.State)
+
+# 2. Calculate the mean "After" grade for each patient
+after_data <- merged_data %>%
+  filter(Date.of.endoscopy >= date.of.first.dose) %>%
+  group_by(Rand_id) %>%
+  summarise(After_Grade = mean(Grade.of.varices, na.rm = TRUE))  # Average after treatment
+
+# 3. Merge before and after data by Rand_id
+combined_data <- left_join(before_data, after_data, by = "Rand_id") %>%
+  filter(!is.na(After_Grade))  # Ensure both before and after values are present
+#### Create a long format for boxplot ####
+processed_data_long <- combined_data %>%
+  pivot_longer(
+    cols = c("Grade.of.varices", "After_Grade"),
+    names_to = "TimePeriod",
+    values_to = "Grade_of_Varices"
+  ) %>%
+  mutate(TimePeriod = factor(TimePeriod, levels = c("Grade.of.varices", "After_Grade"),
+                             labels = c("Before", "After")))
+
+# Add the 'AgeGroup' column to processed_data_long
+processed_data_long$AgeGroup <- cut(processed_data_long$age.at.first.dose,
+                                    breaks = seq(0, 25, by = 5), # Creating 5-year intervals up to 25
+                                    labels = c("0-4", "5-9", "10-14", "15-19", "20-25"),
+                                    right = FALSE)  # right = FALSE means the interval is [0, 5), [5, 10), etc.
+
+```
+
+# Data Visualization
+
+```{r}
+#### Boxplot with statistical test and colored spaghetti lines by AgeGroup ####
+combined_boxplot_with_stats <- ggplot(processed_data_long, aes(x = TimePeriod, y = Grade_of_Varices, fill = TimePeriod)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA, width = 0.6) +  # Boxplot with fill aesthetic
+  geom_line(aes(group = Rand_id, color = AgeGroup), size = 1.2, alpha = 0.8) +  # Spaghetti lines colored by AgeGroup
+  geom_jitter(aes(color = TimePeriod), width = 0, size = 2, shape = 21, alpha = 0.7) +  # Jittered points by TimePeriod
+  scale_fill_manual(values = c("Before" = "gray80", "After" = "gray50")) +  # Boxplot fill colors
+  scale_color_manual(values = c("Before" = "black", "After" = "darkgray")) +  # Point colors
+  scale_color_manual(values = c("0-4" = "gray90", "5-9" = "gray70", "10-14" = "gray50", 
+                                "15-19" = "gray30", "20-25" = "gray10")) +  # Age group line colors
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),            # Remove grid lines
+    axis.line = element_line(color = "black"),# Add axis lines
+    axis.ticks = element_line(color = "black"),
+    axis.text = element_text(color = "black"),
+    legend.position = "right",                # Position the legend on the right
+    legend.title = element_text(size = 12),   # Adjust the legend title size
+    legend.text = element_text(size = 10)     # Adjust the legend text size
+  ) +
+  labs(
+    title = "Grade of Esophageal Varix Before and After LAR-Octreotide",
+    x = "Treatment Period",
+    y = "Grade of Varices",
+    fill = "Time Period",
+    color = "Age Group"
+  ) +
+  stat_compare_means(
+    aes(group = TimePeriod),                # Compare "Before" and "After" groups
+    method = "wilcox.test",                 # Wilcoxon Signed-Rank Test
+    paired = TRUE,                          # Paired test for before and after treatment
+    label = "p.format",                     # Display exact p-value (e.g., p = 0.032)
+    label.x = 1.5,                           # Position of the label
+    label.y = 4.3
+  )
+
+# Display the plot
+print(combined_boxplot_with_stats)
+
+#### Boxplot with disease states ####
+combined_boxplot_with_disease <- ggplot(processed_data_long, aes(x = TimePeriod, y = Grade_of_Varices, fill = TimePeriod)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_line(aes(group = Rand_id, color = AgeGroup), alpha = 0.5, size = 1) +
+  geom_jitter(aes(color = TimePeriod), width = 0, size = 2, shape = 21, alpha = 0.7) +
+  scale_fill_manual(values = c("Before" = "gray80", "After" = "gray50")) +
+  scale_color_manual(values = c("Before" = "black", "After" = "darkgray")) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    axis.text = element_text(color = "black"),
+    legend.position = "bottom"
+  ) +
+  labs(
+    title = "Boxplot of Grade of Varices by Disease State with Individual Points Before and After Treatment",
+    x = "Time Period",
+    y = "Grade of Varices",
+    fill = "Time Period"
+  ) +
+  facet_wrap(~ Disease.State) +  # Facet by Disease State
+  stat_compare_means(
+    aes(group = TimePeriod),
+    method = "wilcox.test",
+    paired = TRUE,
+    label = "p.format",
+    label.x = 1.5,
+    label.y = 4.5
+  )
+
+print(combined_boxplot_with_disease)
+```
+
+# Statistical Analysis
+
+```{r}
+
+#### linear mixed models for the effects of age groups on grade of varices ####
+# Rank-transform the Grade of Varices
+processed_data_long$Rank_Grade_of_Varices <- rank(processed_data_long$Grade_of_Varices)
+
+# Fit the linear mixed model with random effects for AgeGroup and Rand_id
+lmm_model_age <- lmer(
+  Grade_of_Varices ~ TimePeriod + (1 | AgeGroup) + (1 | Rand_id),
+  data = processed_data_long
+)
+# Table with intercept and title
+# Table with intercept and title
+tbl_age <- tbl_regression(lmm_model_age, intercept = TRUE) %>%
+  modify_caption("**Linear Mixed Model: Effects of Age Group on Varice Grade**")
+print(tbl_age)
+
+# Summarize the model (optional for your review)
+print(summary(lmm_model_age))
+
+# Fit the linear mixed model using Rank_Grade_of_Varices as the outcome
+lmm_model_disease <- lmer(Grade_of_Varices ~ TimePeriod * Disease.State + (1 | Rand_id), data = processed_data_long)
+tbl_disease <- tbl_regression(lmm_model_disease, intercept = TRUE) %>%
+  modify_caption("**Linear Mixed Model: Effects of Disease State on Varice Grade**")
+print(tbl_disease)
+
+# Step 2: Display the summary of the model
+summary(lmm_model_disease)
+
+
+
+#### run Hb, MCV, PLTE, Alb, Na with linear mixed-effects model ####
+
+# Step 1: Merge the two datasets
+merged_data <- merge(datatable, labsdata, by.x = "rand", by.y = "rand_id", all.x = TRUE, all.y = TRUE)
+merged_data$Date.of.Transplant <- as.Date(merged_data$Date.of.Transplant, format = "%m/%d/%Y")
+merged_data$Date.of.Shunt <- as.Date(merged_data$Date.of.Shunt, format = "%m/%d/%Y")
+
+# Step 2: Create a condition to exclude rows from labsdata
+exclude_condition <- (
+  # Only apply exclusion if both Date.of.Transplant and Date.of.Shunt are not missing
+  (!is.na(merged_data$Date.of.Transplant) & merged_data$date.of.first.dose < merged_data$Date.of.Transplant) |
+  (!is.na(merged_data$Date.of.Shunt) & merged_data$date.of.first.dose < merged_data$Date.of.Shunt)
+) &
+(
+  # Only exclude if event_end_dt is after the corresponding Date.of.Transplant or Date.of.Shunt
+  (!is.na(merged_data$Date.of.Transplant) & merged_data$event_end_dt > merged_data$Date.of.Transplant) |
+  (!is.na(merged_data$Date.of.Shunt) & merged_data$event_end_dt > merged_data$Date.of.Shunt)
+)
+
+
+# Step 3: Filter out the specific rows from merged_data that meet the condition
+merged_data_filtered <- merged_data[!exclude_condition, ]
+
+# Step 4: Remove participants with only one data point
+participant_counts <- table(merged_data_filtered$rand)
+participants_to_remove <- names(participant_counts[participant_counts == 1])
+
+# Filter out those participants with only one data point
+merged_data_filtered <- merged_data_filtered[!merged_data_filtered$rand %in% participants_to_remove, ]
+
+# Step 5: Check the filtered data
+nrow(merged_data_filtered)  # Check how many rows are left after filtering
+table(merged_data_filtered$rand)  # Check how many unique rand values remain
+
+# Step 6: Run the model for each event_desc
+event_desc_values <- c("HGB", "MCV", "PLTE", "Albumin", "Sodium") 
+model_results <- list()
+
+for (event in event_desc_values) {
+  merged_data_filtered$result_val <- as.numeric(as.character(merged_data_filtered$result_val))
+  merged_data_filtered$octreotide_status <- as.factor(merged_data_filtered$octreotide_status)
+  merged_data_filtered$octreotide_status <- relevel(merged_data_filtered$octreotide_status, ref = "before")
+
+  # Fit the model
+  df <- merged_data_filtered %>% filter(event_desc == event)
+  model <- lmer(result_val ~ octreotide_status + (1 | rand), data = df)
+  conf <- confint(model)
+  model_results[[event]] <- summary(model)
+
+  # Save model summary using tbl_regression
+  tbl <- tbl_regression(model, intercept = TRUE) %>%
+  modify_caption(glue::glue("**Linear Mixed Model: {event}**"))
+  model_results[[event]] <- tbl
+  
+  # Print the model summary for each event in a readable format
+  print(paste("Results for", event, ":"))
+  print(tbl)
+  print(summary(model))
+}
+```
+
+# Conclusion
+
+A Wilcoxon signed-rank test was first used for assessing overall differences in varices grade before and after treatment, yielding a significant reduction (Figure 2, p = 0.014).
+
+We used a linear mixed model with random intercepts for age group to assess the relationship between varices grade and octreotide status, finding a significant reduction in varices grade with treatment (p = 0.00639) while age-related variance was negligible (p \> 0.05). Similarly, although autoimmune hepatitis (p = 0.01620) and biliary atresia (p = 0.03888) were associated with higher varices grades, disease state did not significantly alter the effect of octreotide treatment (all p \> 0.05), suggesting minimal variability in treatment response due to age or disease state.
+
+The linear mixed models showed significant changes in laboratory values during octreotide therapy. For hemoglobin (before treatment = 9.41), levels increased by 0.22 during therapy (p\<0.001) and by 0.57 after therapy (p\<0.001). MCV (before treatment = 85.73) decreased 0.83 during therapy (p\<0.001) and by 1.67 after therapy (p\<0.001). Platelet count (before treatment = 152.67) significantly decreased 45.47 during therapy (p\<0.001) and by 16.10 after therapy (p\<0.001). Albumin (before treatment = 3.27) increased 0.14 during therapy (p\<0.001) and by 0.28 after therapy (p\<0.001). Sodium (before treatment = 137.68) decreased 0.88 during therapy (p\<0.001) and by 0.46 after therapy (p\<0.001). These findings indicate significant, consistent effects of octreotide therapy on these clinical markers.  
